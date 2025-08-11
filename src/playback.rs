@@ -1,13 +1,17 @@
 // -- Imports -- //
 
-use crate::errors::BoardError;
+use crate::errors::PlaybackError;
 
 use cpal::traits::{DeviceTrait, HostTrait};
+
+// -- Consts -- //
+
+const LOG_ON_DROP: bool = false;
 
 // -- Exports -- //
 
 pub struct Player {
-	host: cpal::Host,
+	_host: cpal::Host,
 	stream: rodio::OutputStream,
 	sink: rodio::Sink,
 }
@@ -22,23 +26,42 @@ impl Player {
 			.devices()?
 			.find(|device| device.name().is_ok_and(|s| &s == audio_device_name))
 		else {
-			return Err(BoardError::InvalidDeviceName(audio_device_name.to_string()).into())
+			return Err(PlaybackError::InvalidDeviceName(audio_device_name.to_string()).into())
 		};
 		
-		let stream = rodio::OutputStreamBuilder::from_device(device)?.open_stream()?;
+		if !device.supports_output() {
+			return Err(PlaybackError::DeviceLacksOutput(audio_device_name.to_string()).into())
+		}
+		
+		let mut stream = rodio::OutputStreamBuilder::from_device(device)?.open_stream()?;
 		let sink = rodio::Sink::connect_new(&stream.mixer());
 		
-		Ok(Self { host, stream, sink })
+		stream.log_on_drop(LOG_ON_DROP);
+		
+		Ok(Self { _host: host, stream, sink })
 	}
 	
-	pub fn get_sink(&self) -> &rodio::Sink { &self.sink }
+	pub fn is_paused(&self) -> bool { self.sink.is_paused() }
+	pub fn is_empty(&self) -> bool { self.sink.empty() }
+	
+	pub fn get_volume(&self) -> f32 { self.sink.volume() }
+	pub fn set_volume(&self, value: f32) { self.sink.set_volume(value) }
+	pub fn lower_volume(&self, amount: &f32) {
+		let vol = self.sink.volume();
+		if vol <= *amount { self.sink.set_volume(0.0) }
+		else { self.sink.set_volume(vol - amount) }
+	}
+	pub fn raise_volume(&self, amount: &f32) {
+		let vol = self.sink.volume() + amount;
+		if vol >= 1.5 { self.sink.set_volume(1.5) }
+		else { self.sink.set_volume(vol) }
+	}
+	
+	pub fn set_log_on_drop(&mut self, enabled: bool) { self.stream.log_on_drop(enabled) }
 	
 	pub fn play(&self) { self.sink.play() }
 	pub fn pause(&self) { self.sink.pause() }
 	pub fn clear(&self) { self.sink.clear() }
-	
-	pub fn is_paused(&self) -> bool { self.sink.is_paused() }
-	pub fn is_empty(&self) -> bool { self.sink.empty() }
 	
 	pub fn play_audio<S>(&self, source: S) where
 		S: rodio::Source + Send + 'static,

@@ -1,75 +1,107 @@
 // -- Imports -- //
 
-use std::clone::Clone;
-use rdev::{Event, EventType, Key};
+use rdev::{EventType, Key};
 
+use std::time::{Duration, Instant};
 use std::sync::{LazyLock, Mutex};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{Ordering, AtomicBool};
 
 // -- Exports -- //
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum KeyDirInput { Up, Down, Left, Right }
-
-#[derive(Debug)]
-pub struct ComboTree<T> {
-	item: Option<T>,
-	links: [Option<Box<Self>>; 4],
+pub enum KeyDirInput {
+	/// Slash, KP_Divide
+	Mark = 0,
+	/// Up_Arrow, KP_8
+	Up = 1,
+	/// Down_Arrow, KP_2
+	Down = 2,
+	/// LeftArrow, KP_4
+	Left = 3,
+	/// RightArrow, KP_6
+	Right = 4,
 }
 
 #[derive(Debug)]
-pub struct KeyboardWatcher<T> {
-	input_sequence: Vec<KeyDirInput>,
-	combos: ComboTree<T>,
-}
+pub struct KeyboardWatcher<T> { combos: ComboNode<T> }
+
+// -- Constants -- //
+
+const LISTEN_ACCESS_INTERVAL: Duration = Duration::from_millis(50);
+const INPUT_RESET_TIMER: Duration = Duration::from_secs(3);
 
 // -- Statics -- //
 
-static LISTENER_THREAD: LazyLock<std::thread::Thread> = LazyLock::new(||
-	std::thread::spawn(|| rdev::listen(input_listener)).thread().clone()
-);
-static COMBO_SEQUENCE: LazyLock<Mutex<Vec<KeyDirInput>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 static COMBO_IS_ACTIVE: AtomicBool = AtomicBool::new(true);
+static COMBO_SEQUENCE: LazyLock<Mutex<Vec<KeyDirInput>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+static LAST_COMBO_INPUT: LazyLock<Mutex<Instant>> = LazyLock::new(
+	|| Mutex::new(Instant::now())
+);
+static LISTENER_THREAD: LazyLock<std::thread::Thread> = LazyLock::new(
+	|| std::thread::spawn(|| rdev::listen(input_listener)).thread().clone()
+);
 
-fn input_listener(e: Event) {
+fn input_listener(e: rdev::Event) {
 	let kdi = match e.event_type {
-		EventType::KeyPress(Key::UpArrow) => KeyDirInput::Up,
-		EventType::KeyPress(Key::DownArrow) => KeyDirInput::Down,
-		EventType::KeyPress(Key::LeftArrow) => KeyDirInput::Left,
-		EventType::KeyPress(Key::RightArrow) => KeyDirInput::Right,
-		EventType::KeyPress(Key::Return | Key::KpReturn
-		) => {
-			COMBO_IS_ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+		EventType::KeyPress(Key::UpArrow | Key::Kp8) => KeyDirInput::Up,
+		EventType::KeyPress(Key::DownArrow | Key::Kp2) => KeyDirInput::Down,
+		EventType::KeyPress(Key::LeftArrow | Key::Kp4) => KeyDirInput::Left,
+		EventType::KeyPress(Key::RightArrow | Key::Kp6) => KeyDirInput::Right,
+		EventType::KeyPress(Key::Slash | Key::KpDivide) => KeyDirInput::Mark,
+		
+		EventType::KeyPress(Key::Return | Key::KpReturn) => {
+			COMBO_IS_ACTIVE.store(false, Ordering::Release);
 			std::thread::park();
+			*LAST_COMBO_INPUT.lock().unwrap() = Instant::now();
 			return;
 		}
 		
 		_ => return,
 	};
 	
-	COMBO_SEQUENCE.lock().unwrap().push(kdi);
+	let mut seq = COMBO_SEQUENCE.lock().unwrap();
+	let mut earlier = LAST_COMBO_INPUT.lock().unwrap();
+	let now = Instant::now();
+	
+	if now.duration_since(*earlier) > INPUT_RESET_TIMER { seq.clear() }
+	*earlier = now;
+	
+	seq.push(kdi);
 }
 
-// -- Impl -- //
+// -- Export Impls -- //
 
 impl <T> KeyboardWatcher<T> {
-	pub fn new() -> Self { Self { input_sequence: Vec::new(), combos: ComboTree::new() } }
+	#[inline]
+	pub const fn new() -> Self { Self { combos: ComboNode::new() } }
 	
+	#[inline]
 	pub fn insert(&mut self, t: T, sequence: impl IntoIterator<Item=KeyDirInput>) {
 		self.combos.insert(t, sequence.into_iter());
 	}
 	
+	#[inline]
 	pub fn remove(&mut self, sequence: impl IntoIterator<Item=KeyDirInput>) {
 		self.combos.remove(sequence.into_iter());
 	}
 	
+	#[inline]
+	pub fn get(&self, sequence: impl IntoIterator<Item=KeyDirInput>) -> Option<&T> {
+		self.combos.get(sequence.into_iter())
+	}
+	
+	#[inline]
+	pub fn get_mut(&mut self, sequence: impl IntoIterator<Item=KeyDirInput>) -> Option<&mut T> {
+		self.combos.get_mut(sequence.into_iter())
+	}
+	
 	pub fn listen_for_combo(&mut self) -> Vec<KeyDirInput> {
-		COMBO_IS_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+		COMBO_IS_ACTIVE.store(true, Ordering::Release);
 		LISTENER_THREAD.unpark();
 		
 		loop {
-			if !COMBO_IS_ACTIVE.load(std::sync::atomic::Ordering::Acquire) { break }
-			std::thread::sleep(std::time::Duration::from_millis(10));
+			if !COMBO_IS_ACTIVE.load(Ordering::Acquire) { break }
+			std::thread::sleep(LISTEN_ACCESS_INTERVAL);
 		};
 		
 		let mut out = Vec::new();
@@ -77,90 +109,77 @@ impl <T> KeyboardWatcher<T> {
 		
 		out
 	}
-	
-	pub fn get(&self, sequence: impl IntoIterator<Item=KeyDirInput>) -> Option<&T> {
-		self.combos.get(sequence.into_iter())
-	}
-	
-	pub fn get_mut(&mut self, sequence: impl IntoIterator<Item=KeyDirInput>) -> Option<&mut T> {
-		self.combos.get_mut(sequence.into_iter())
-	}
 }
 
-impl <T> ComboTree<T> {
-	pub const fn new() -> Self { Self { item: None, links: [None, None, None, None] } }
+// -- Combo Nodes -- //
+
+
+#[derive(Debug)]
+struct ComboNode<T> { item: Option<T>, links: [Option<Box<Self>>; 5] }
+
+impl <T> ComboNode<T> {
+	#[inline]
+	const fn new() -> Self { Self { item: None, links: [None, None, None, None, None] } }
 	
-	fn insert(&mut self, t: T, mut sequence: impl Iterator<Item=KeyDirInput>) {
-		let Some(kdi) = sequence.next()
-		else { self.item = Some(t); return };
+	fn from(t: T, mut iter: impl Iterator<Item=KeyDirInput>) -> Self {
+		let mut out = Self::new();
 		
-		let idx = kdi.to_usize();
-		
-		match &mut self.links[idx] {
-			Some(ct) => ct.insert(t, sequence),
-			None => {
-				let mut ct = Self::new();
-				ct.insert(t, sequence);
-				self.links[idx] = Some(Box::new(ct));
-			}
-		}
-	}
-	
-	// Returns true if parent items can consider removing this link.
-	fn remove(&mut self, mut sequence: impl Iterator<Item=KeyDirInput>) -> bool {
-		let Some(kdi) = sequence.next()
-		else {
-			return if let Some(_) = self.item.take()
-				&& let &[None, None, None, None] = &self.links { true } else { false }
+		if let Some(kdi) = iter.next() {
+			out.links[kdi as usize] = Some(Box::new(Self::from(t, iter)));
+		} else {
+			out.item = Some(t);
 		};
 		
-		let idx = kdi.to_usize();
+		out
+	}
+	
+	fn insert(&mut self, t: T, mut iter: impl Iterator<Item=KeyDirInput>) {
+		let Some(kdi) = iter.next()
+		else { self.item = Some(t); return };
 		
-		let Some(ref mut ct) = self.links[idx]
+		match &mut self.links[kdi as usize] {
+			Some(ct) => ct.insert(t, iter),
+			None => self.links[kdi as usize] = Some(Box::new(Self::from(t, iter))),
+		}
+	}
+	
+	/// Returns
+	/// - **true**: The parent node should remove this link.
+	/// - **false**: The parent node should not remove this link.
+	fn remove(&mut self, mut iter: impl Iterator<Item=KeyDirInput>) -> bool {
+		let Some(kdi) = iter.next()
+		else {
+			self.item.take();
+			return if let [None, None, None, None, None] = self.links { true } else { false }
+		};
+		
+		let Some(ref mut ct) = self.links[kdi as usize]
 		else { return false };
 		
-		if ct.remove(sequence) {
-			self.links[idx] = None;
+		if ct.remove(iter) {
+			self.links[kdi as usize] = None;
 			
-			if let None = self.item
-				&& let [None, None, None, None] = self.links { true } else { false }
-		} else {
-			false
-		}
+			if let None = self.item && let [None, None, None, None, None] = self.links { true } else { false }
+		} else { false }
 	}
 	
-	pub fn get(&self, mut sequence: impl Iterator<Item=KeyDirInput>) -> Option<&T> {
-		let Some(kdi) = sequence.next()
+	fn get(&self, mut iter: impl Iterator<Item=KeyDirInput>) -> Option<&T> {
+		let Some(kdi) = iter.next()
 		else { return (&self.item).as_ref() };
 		
-		let idx = kdi.to_usize();
-		
-		let Some(ref ct) = self.links[idx]
+		let Some(ref ct) = self.links[kdi as usize]
 		else { return None };
 		
-		ct.get(sequence)
+		ct.get(iter)
 	}
 	
-	pub fn get_mut(&mut self, mut sequence: impl Iterator<Item=KeyDirInput>) -> Option<&mut T> {
-		let Some(kdi) = sequence.next()
+	fn get_mut(&mut self, mut iter: impl Iterator<Item=KeyDirInput>) -> Option<&mut T> {
+		let Some(kdi) = iter.next()
 		else { return (&mut self.item).as_mut() };
 		
-		let idx = kdi.to_usize();
-		
-		let Some(ref mut ct) = self.links[idx]
+		let Some(ref mut ct) = self.links[kdi as usize]
 		else { return None };
 		
-		ct.get_mut(sequence)
-	}
-}
-
-impl KeyDirInput {
-	pub const fn to_usize(&self) -> usize {
-		match self {
-			Self::Up => 0,
-			Self::Down => 1,
-			Self::Left => 2,
-			Self::Right => 3,
-		}
+		ct.get_mut(iter)
 	}
 }

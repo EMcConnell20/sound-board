@@ -5,7 +5,10 @@ use thiserror::Error;
 // -- Exports -- //
 
 #[derive(Error, Debug)]
-pub enum BoardError {
-	#[error("The device \"{0}\" could not be found")]
+pub enum PlaybackError {
+	// Device Errors
+	#[error("The device \"{0}\" was not found")]
 	InvalidDeviceName(String),
+	#[error("The device \"{0}\" does not support audio output")]
+	DeviceLacksOutput(String),
 }
