@@ -1,0 +1,9 @@
+# Rust Files
+target
+Cargo.lock
+
+# RustRover Files
+.idea
+
+# MacOS Files
+*.DS_Store

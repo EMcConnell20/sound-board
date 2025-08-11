@@ -1,0 +1,22 @@
+[package]
+name = "sound-board"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["tracing"]
+tracing = ["rodio/tracing"]
+wav = ["rodio/wav"]
+
+[dependencies]
+cpal = "0.16.0"
+thiserror = "2.0.12"
+rdev = "0.5.3"
+
+[dependencies.rodio]
+version = "0.21.1"
+default-features = false
+features = ["flac", "mp3", "playback"]
+
+[profile.release]
+lto = true
