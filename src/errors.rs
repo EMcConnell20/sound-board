@@ -11,4 +11,6 @@ pub enum PlaybackError {
 	InvalidDeviceName(String),
 	#[error("The device \"{0}\" does not support audio output")]
 	DeviceLacksOutput(String),
+	#[error("The device \"{0}\" does not support audio input")]
+	DeviceLacksInput(String)
 }

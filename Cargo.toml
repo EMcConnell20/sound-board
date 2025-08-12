@@ -16,7 +16,7 @@ rdev = "0.5.3"
 [dependencies.rodio]
 version = "0.21.1"
 default-features = false
-features = ["flac", "mp3", "playback"]
+features = ["playback", "mp3", "flac", "symphonia"]
 
 [profile.release]
 lto = true

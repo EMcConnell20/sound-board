@@ -2,7 +2,7 @@
 
 use crate::errors::PlaybackError;
 
-use cpal::traits::{DeviceTrait, HostTrait};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 // -- Consts -- //
 
@@ -21,13 +21,9 @@ impl Player {
 		// Get the default host (CoreAudio on macOS)
 		let host = cpal::default_host();
 		
-		// Get the specified audio device
-		let Some(device) = host
-			.devices()?
-			.find(|device| device.name().is_ok_and(|s| &s == audio_device_name))
-		else {
-			return Err(PlaybackError::InvalidDeviceName(audio_device_name.to_string()).into())
-		};
+		// Get the digital audio device
+		let Some(device) = host.devices()?.find(|device| device.name().is_ok_and(|s| &s == audio_device_name))
+		else { return Err(PlaybackError::InvalidDeviceName(audio_device_name.to_string()).into()) };
 		
 		if !device.supports_output() {
 			return Err(PlaybackError::DeviceLacksOutput(audio_device_name.to_string()).into())
