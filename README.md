@@ -1,3 +1,3 @@
-## Sound-Board (Early Developement Stage) ##
+## Sound-Board (Early Development Stage) ##
 
-*A Rust app for playing audio to a device's input channel.*
+*A Rust soundboard app for playing audio to a device's input channel.*

@@ -8,104 +8,120 @@ use std::sync::atomic::{Ordering, AtomicBool};
 
 // -- Exports -- //
 
+// DOCS Control combos should only start with a `Mark`
+// DOCS Play audio combos should not start with a `Mark`
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum KeyDirInput {
-	/// Slash, KP_Divide
+pub enum KeyInput {
+	/// `/` Special Input [Slash or KP_Divide]
 	Mark = 0,
-	/// Up_Arrow, KP_8
+	/// `↑` Up Input [Up Arrow or KP_8]
 	Up = 1,
-	/// Down_Arrow, KP_2
+	/// `↓` Down Input [Down Arrow or KP_2]
 	Down = 2,
-	/// LeftArrow, KP_4
+	/// `←` Left Input [Left Arrow or KP_4]
 	Left = 3,
-	/// RightArrow, KP_6
+	/// `→` Right Input [Right Arrow or KP_6]
 	Right = 4,
 }
 
+// DOCS Only one KeyboardWatcher should ever need to exist at a time.
 #[derive(Debug)]
-pub struct KeyboardWatcher<T> { combos: ComboNode<T> }
+pub struct KeyboardWatcher<T> { input_tree: InputNode<T> }
 
 // -- Constants -- //
 
-const LISTEN_ACCESS_INTERVAL: Duration = Duration::from_millis(50);
-const INPUT_RESET_TIMER: Duration = Duration::from_secs(3);
+const CHECK_IF_LISTENER_ACTIVE_INTERVAL: Duration = Duration::from_millis(50);
+const RESET_INPUT_SEQUENCE_TIMER_LENGTH: Duration = Duration::from_secs(3);
 
 // -- Statics -- //
 
-static COMBO_IS_ACTIVE: AtomicBool = AtomicBool::new(true);
-static COMBO_SEQUENCE: LazyLock<Mutex<Vec<KeyDirInput>>> = LazyLock::new(|| Mutex::new(Vec::new()));
-static LAST_COMBO_INPUT: LazyLock<Mutex<Instant>> = LazyLock::new(
+static CURRENT_INPUT_SEQUENCE: LazyLock<Mutex<Vec<KeyInput>>> = LazyLock::new(
+	|| Mutex::new(Vec::new())
+);
+static LAST_TIME_INPUT_WAS_RECORDED: LazyLock<Mutex<Instant>> = LazyLock::new(
 	|| Mutex::new(Instant::now())
 );
+
+static LISTENER_ACTIVE: AtomicBool = AtomicBool::new(false);
 static LISTENER_THREAD: LazyLock<std::thread::Thread> = LazyLock::new(
 	|| std::thread::spawn(|| rdev::listen(input_listener)).thread().clone()
 );
 
 fn input_listener(e: rdev::Event) {
 	let kdi = match e.event_type {
-		EventType::KeyPress(Key::UpArrow | Key::Kp8) => KeyDirInput::Up,
-		EventType::KeyPress(Key::DownArrow | Key::Kp2) => KeyDirInput::Down,
-		EventType::KeyPress(Key::LeftArrow | Key::Kp4) => KeyDirInput::Left,
-		EventType::KeyPress(Key::RightArrow | Key::Kp6) => KeyDirInput::Right,
-		EventType::KeyPress(Key::Slash | Key::KpDivide) => KeyDirInput::Mark,
+		EventType::KeyPress(Key::UpArrow | Key::Kp8) => KeyInput::Up,
+		EventType::KeyPress(Key::DownArrow | Key::Kp2) => KeyInput::Down,
+		EventType::KeyPress(Key::LeftArrow | Key::Kp4) => KeyInput::Left,
+		EventType::KeyPress(Key::RightArrow | Key::Kp6) => KeyInput::Right,
+		EventType::KeyPress(Key::Slash | Key::KpDivide) => KeyInput::Mark,
+		
+		// TODO Add a keybind that clears the sequence.
+		// TODO Add a keybind to toggle input recording.
 		
 		EventType::KeyPress(Key::Return | Key::KpReturn) => {
-			COMBO_IS_ACTIVE.store(false, Ordering::Release);
-			std::thread::park();
-			*LAST_COMBO_INPUT.lock().unwrap() = Instant::now();
+			LISTENER_ACTIVE.store(false, Ordering::Release); // NOTE Does this need higher ordering?
+			std::thread::park(); // NOTE Need to make sure this doesn't have unintended consequences.
+			*LAST_TIME_INPUT_WAS_RECORDED.lock().unwrap() = Instant::now();
 			return;
 		}
 		
 		_ => return,
 	};
 	
-	let mut seq = COMBO_SEQUENCE.lock().unwrap();
-	let mut earlier = LAST_COMBO_INPUT.lock().unwrap();
+	let mut sequence = CURRENT_INPUT_SEQUENCE.lock().unwrap();
+	let mut earlier = LAST_TIME_INPUT_WAS_RECORDED.lock().unwrap();
 	let now = Instant::now();
 	
-	if now.duration_since(*earlier) > INPUT_RESET_TIMER { seq.clear() }
+	// NOTE Consider adding a maximum sequence and checking for that here.
+	if now.duration_since(*earlier) > RESET_INPUT_SEQUENCE_TIMER_LENGTH { sequence.clear() }
 	*earlier = now;
 	
-	seq.push(kdi);
+	sequence.push(kdi);
 }
 
 // -- Export Impls -- //
 
 impl <T> KeyboardWatcher<T> {
+	// NOTE There should really only be one KeyboardWatcher at a time,
+	//		so this function probably needs to guarantee that. A singleton
+	//		approach would probably be okay, but it might be better to
+	//		use a static bool and have this just return an Option<Self>.
+	// TODO Make this guarantee that only one KeyboardWatcher is ever active.
 	#[inline]
-	pub const fn new() -> Self { Self { combos: ComboNode::new() } }
+	pub const fn new() -> Self { Self { input_tree: InputNode::new() } }
 	
 	#[inline]
-	pub fn insert(&mut self, t: T, sequence: impl IntoIterator<Item=KeyDirInput>) {
-		self.combos.insert(t, sequence.into_iter());
+	pub fn insert(&mut self, t: T, sequence: impl IntoIterator<Item=KeyInput>) {
+		self.input_tree.insert(t, sequence.into_iter());
 	}
 	
 	#[inline]
-	pub fn remove(&mut self, sequence: impl IntoIterator<Item=KeyDirInput>) {
-		self.combos.remove(sequence.into_iter());
+	pub fn remove(&mut self, sequence: impl IntoIterator<Item=KeyInput>) {
+		self.input_tree.remove(sequence.into_iter());
 	}
 	
 	#[inline]
-	pub fn get(&self, sequence: impl IntoIterator<Item=KeyDirInput>) -> Option<&T> {
-		self.combos.get(sequence.into_iter())
+	pub fn get(&self, sequence: impl IntoIterator<Item=KeyInput>) -> Option<&T> {
+		self.input_tree.get(sequence.into_iter())
 	}
 	
 	#[inline]
-	pub fn get_mut(&mut self, sequence: impl IntoIterator<Item=KeyDirInput>) -> Option<&mut T> {
-		self.combos.get_mut(sequence.into_iter())
+	pub fn get_mut(&mut self, sequence: impl IntoIterator<Item=KeyInput>) -> Option<&mut T> {
+		self.input_tree.get_mut(sequence.into_iter())
 	}
 	
-	pub fn listen_for_combo(&mut self) -> Vec<KeyDirInput> {
-		COMBO_IS_ACTIVE.store(true, Ordering::Release);
+	// NOTE Maybe make a version of this function that can timeout?
+	pub fn listen_for_combo(&mut self) -> Vec<KeyInput> {
+		LISTENER_ACTIVE.store(true, Ordering::Release);
 		LISTENER_THREAD.unpark();
 		
 		loop {
-			if !COMBO_IS_ACTIVE.load(Ordering::Acquire) { break }
-			std::thread::sleep(LISTEN_ACCESS_INTERVAL);
+			if !LISTENER_ACTIVE.load(Ordering::Acquire) { break }
+			std::thread::sleep(CHECK_IF_LISTENER_ACTIVE_INTERVAL);
 		};
 		
 		let mut out = Vec::new();
-		out.append(&mut COMBO_SEQUENCE.try_lock().unwrap());
+		out.append(&mut CURRENT_INPUT_SEQUENCE.lock().unwrap());
 		
 		out
 	}
@@ -113,19 +129,19 @@ impl <T> KeyboardWatcher<T> {
 
 // -- Combo Nodes -- //
 
-
+// NOTE There are probably better data structures for this, but this works well enough as it is.
 #[derive(Debug)]
-struct ComboNode<T> { item: Option<T>, links: [Option<Box<Self>>; 5] }
+struct InputNode<T> { item: Option<T>, links: [Option<Box<Self>>; 5] }
 
-impl <T> ComboNode<T> {
+impl <T> InputNode<T> {
 	#[inline]
 	const fn new() -> Self { Self { item: None, links: [None, None, None, None, None] } }
 	
-	fn from(t: T, mut iter: impl Iterator<Item=KeyDirInput>) -> Self {
+	fn from_iter(t: T, mut iter: impl Iterator<Item= KeyInput>) -> Self {
 		let mut out = Self::new();
 		
 		if let Some(kdi) = iter.next() {
-			out.links[kdi as usize] = Some(Box::new(Self::from(t, iter)));
+			out.links[kdi as usize] = Some(Box::new(Self::from_iter(t, iter)));
 		} else {
 			out.item = Some(t);
 		};
@@ -133,20 +149,20 @@ impl <T> ComboNode<T> {
 		out
 	}
 	
-	fn insert(&mut self, t: T, mut iter: impl Iterator<Item=KeyDirInput>) {
+	fn insert(&mut self, t: T, mut iter: impl Iterator<Item= KeyInput>) {
 		let Some(kdi) = iter.next()
 		else { self.item = Some(t); return };
 		
 		match &mut self.links[kdi as usize] {
 			Some(ct) => ct.insert(t, iter),
-			None => self.links[kdi as usize] = Some(Box::new(Self::from(t, iter))),
+			None => self.links[kdi as usize] = Some(Box::new(Self::from_iter(t, iter))),
 		}
 	}
 	
 	/// Returns
 	/// - **true**: The parent node should remove this link.
 	/// - **false**: The parent node should not remove this link.
-	fn remove(&mut self, mut iter: impl Iterator<Item=KeyDirInput>) -> bool {
+	fn remove(&mut self, mut iter: impl Iterator<Item= KeyInput>) -> bool {
 		let Some(kdi) = iter.next()
 		else {
 			self.item.take();
@@ -163,7 +179,7 @@ impl <T> ComboNode<T> {
 		} else { false }
 	}
 	
-	fn get(&self, mut iter: impl Iterator<Item=KeyDirInput>) -> Option<&T> {
+	fn get(&self, mut iter: impl Iterator<Item= KeyInput>) -> Option<&T> {
 		let Some(kdi) = iter.next()
 		else { return (&self.item).as_ref() };
 		
@@ -173,7 +189,7 @@ impl <T> ComboNode<T> {
 		ct.get(iter)
 	}
 	
-	fn get_mut(&mut self, mut iter: impl Iterator<Item=KeyDirInput>) -> Option<&mut T> {
+	fn get_mut(&mut self, mut iter: impl Iterator<Item= KeyInput>) -> Option<&mut T> {
 		let Some(kdi) = iter.next()
 		else { return (&mut self.item).as_mut() };
 		
